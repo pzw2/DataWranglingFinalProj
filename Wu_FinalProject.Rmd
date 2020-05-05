@@ -1,0 +1,292 @@
+---
+title: "Final Project Data Wrangling"
+author: "Perry Wu"
+date: "4/23/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(rvest)#scrape leaderboards
+library(jsonlite)#parse json
+library(dplyr)
+library(tidyverse)#mutate and stuff
+library(RCurl)#api
+library(lubridate)#dates
+library(stringr)#strremoveall
+library(faraway)#halfnorm
+library(corrplot)#correlation plot
+library(readtext)#read api key file
+library(ggplot2)#ggplot
+```
+
+```{r options}
+gatherdata=FALSE #variable to decide whether to gather the data or read. 10k API calls takes 4 hours
+```
+#Read API key file
+```{r APIKEY}
+APIKEY=readtext("api.key.Wu.osu.txt")
+APIKEY=APIKEY$text
+```
+#initial data frame to merge into
+```{r InitialRanking}
+if(gatherdata) {
+initialscrape = read_html("https://osu.ppy.sh/rankings/osu/performance")%>%
+   html_table()
+  ranking=initialscrape[[1]]
+}
+```
+#Get Ranking pages lower to upper
+```{r}
+getranking <- function(lower, upper, mergetarget) {
+  if(lower>upper){
+    temp=lower
+    lower=upper
+    upper=temp
+  }
+  for(i in lower:upper){
+  secondaryscrape = read_html(paste("https://osu.ppy.sh/rankings/osu/performance?page=",i,"#scores",sep=""))%>%
+    html_table()
+  mergetarget=rbind(mergetarget,secondaryscrape[[1]])
+  }
+  return(mergetarget)
+}
+```
+
+
+#Scrape the rest of the data for top 10k will get error 429 so may need multiple runs
+```{r RankingDriver}
+  if(gatherdata) {
+    time=60
+    ranking=getranking(2,50,ranking)
+    Sys.sleep(time)
+    ranking=getranking(51,100,ranking)
+    Sys.sleep(time)
+    ranking=getranking(101,150,ranking)
+    Sys.sleep(time)
+    ranking=getranking(151,200,ranking)
+    names=ranking[,2]
+  } else{
+    ranking=read.csv("rankdataclean.csv")
+    names=ranking[,2]
+  }
+```
+#Get initial user data 
+```{r InitialUser}
+if(gatherdata) {
+  UserData=getForm(
+  uri="https://osu.ppy.sh/api/get_user",
+  k=APIKEY,#API key
+  u="WhiteCat",#username
+  m=0,#mode=0 osu
+  type="string"
+  )%>%
+  fromJSON()%>%
+  as.data.frame()
+}
+
+```
+#Get 1-10000 user data data collected 8-11:30pm 5/1
+```{r UserLoop}
+if(gatherdata) {
+  for(i in 9999:length(names)){#set to 9999 to avoid accidentally sending too many requests set to 1 to get data
+  x=getForm(
+  uri="https://osu.ppy.sh/api/get_user",
+  k=APIKEY,#API key
+  u=names[i],#username
+  m=0,#mode=0 osu
+  type="string"
+  )
+  z=fromJSON(x)%>%
+    as.data.frame()
+  UserData=rbind(UserData,z)
+  if(i%%10==0){
+    Sys.sleep(10)#Sleep 1 second to avoid going over 60/minute
+  }
+  }
+}else{
+  UserData=read.csv("UserDataclean.csv")
+  UserData=UserData[,-1]#saved row names for some reason
+}
+
+```
+#Current rate limit is set at an insanely high 1200 requests per minute, with burst capability of up to 200 beyond that. If you require more, you probably fall into the above category of abuse. If you are doing more than 60 requests a minute, you should probably give peppy a yell.
+```{r RemoveEvents}
+if(gatherdata) {
+  UserData=UserData[ , -which(names(UserData) %in% c("events"))]
+  UserData=UserData[-1,]#remove duplicate value
+}
+```
+
+```{r WriteUnclean}
+if(gatherdata) {
+  write.csv(ranking,"rankdata.csv",row.names = FALSE)
+  write.csv(UserData,"UserData.csv", row.names = FALSE)
+}
+```
+
+```{r ConvertNumeric}
+#not atomic manually done
+if(gatherdata) {
+  a1=ranking[,1]%>%str_remove_all("#")%>%as.numeric()
+  a2=ranking[,2]
+  a3=ranking[,3]%>%str_remove_all("%")%>%as.numeric()
+  a4=ranking[,4]%>%str_remove_all(",")%>%as.numeric()
+  a5=ranking[,5]%>%str_remove_all(",")%>%as.numeric()
+  a6=ranking[,6]%>%str_remove_all(",")%>%as.numeric()
+  a7=ranking[,7]%>%str_remove_all(",")%>%as.numeric()
+  a8=ranking[,8]%>%str_remove_all(",")%>%as.numeric()
+  ranking=data.frame(rank=a1,username=a2,acc=a3,playcount=a4,performance=a5,SS=a6,S=a7,A=a8)
+}
+```
+
+```{r CleanUserData}
+if(gatherdata){
+  joindates=ymd_hms(UserData[,"join_date"])
+  difference=as.numeric(difftime(round_date(today(),"days"),round_date(joindates,"days"),units = "days"))
+  
+  UserData[,"join_date"]=difference
+  UserData[ , -which(names(UserData) %in% c("username","country"))]=sapply(UserData[ , -which(names(UserData) %in% c("username","country"))], as.numeric) #change type to of char to numeric
+}
+```
+
+```{r savecleaneddata}
+if(gatherdata){
+  write.csv(at,"rankdataclean.csv", row.names = FALSE)
+  write.csv(UserData,"userdataclean.csv")
+}
+```
+
+
+```{r Mutate}
+
+UserData2=UserData%>%
+  filter(pp_rank<10000)%>%#remove outside of 10k rank - possible name change during data gathering
+  mutate(trueAcc=(count300+count100/3+count50/6)/(count300+count100+count50))%>%#trueacc based on accuracy formula
+  mutate(hitsperplay=(count300+count100+count50)/playcount)%>%
+  mutate(SS=count_rank_ss+count_rank_ssh)%>%
+  mutate(S=count_rank_s+count_rank_sh)%>%
+  mutate(avgplaytime=total_seconds_played/playcount)%>%
+  mutate(Sorbetter=count_rank_ssh+count_rank_ss+count_rank_sh+count_rank_s)%>%
+  mutate(Aorbetter=count_rank_ssh+count_rank_ss+count_rank_sh+count_rank_s+count_rank_a)
+
+```
+```{r Histogram}
+UserData2=UserData2[,-which(names(UserData2) %in% c("username","country"))] #non numeric
+
+linearscale=c("user_id","join_date","pp_rank","level","pp_raw","accuracy","pp_country_rank","trueAcc","avgplaytime","hitsperplay") #things expected to graph well linearly
+par(mfrow=c(3,3))
+for(i in names(UserData2)){
+  if(i %in% linearscale){#check if it is intended to be linearscale
+    hist(UserData2[,paste(i)],main=paste("Histogram of", names(UserData2[i])),breaks=50,xlab=i)
+  }
+  else {
+    hist(log(UserData2[,paste(i)]),main=paste("Histogram of log",names(UserData2[i])),breaks=50,xlab=paste("log",i))
+  }
+}
+```
+
+```{r correl}
+UserDatacor1=UserData[,-which(names(UserData) %in% c("username","country"))] #non numeric
+cormat=cor(UserDatacor1)
+corrplot(cormat)
+UserDatacor=UserData2[,-which(names(UserData2) %in% c("count300","count100","count50","count_rank_ss","count_rank_ssh","count_rank_s","count_rank_sh"))] #non numeric
+cormat2=cor(UserDatacor)
+corrplot(cormat2)
+```
+```{r countries}
+countries=UserData%>%
+  count(country)%>%
+  arrange(desc(n))
+countries
+hist(countries$n,breaks=50,main="Histogram of Country Representation in Top 10k",xlab="Players in Country")
+```
+```{r}
+var(ranking$performance)
+```
+
+```{r Simple}
+simplemod=lm(performance~SS+S+A+playcount+acc,data=ranking)
+summary(simplemod)
+simpleresid=data.frame(residuals=summary(simplemod)$residuals,predicted=simplemod$fitted.values)
+ggplot(data=simpleresid,aes(x=predicted,y=residuals))+geom_point()+geom_vline(xintercept = 6715, color="red")+geom_segment(aes(x = 6000, y = 715, xend = 14000, yend = 6715-14000),color="blue")
+```
+
+```{r LogSimple}
+simplemod2=lm(performance~log(SS+1)+log(S+1)+log(A+1)+log(playcount)+acc,data=ranking)
+summary(simplemod2)
+simpleresid2=data.frame(residuals=summary(simplemod2)$residuals,predicted=simplemod2$fitted.values)
+ggplot(data=simpleresid2,aes(x=predicted,y=residuals))+geom_point()+geom_vline(xintercept = 6715, color="red")+geom_segment(aes(x = 3500, y = 3215, xend = 11000, yend = 6715-11000),color="blue")
+```
+
+```{r Linearmod}
+linearmod=lm(pp_raw~join_date+trueAcc+playcount+ranked_score+total_score+level+accuracy+total_seconds_played+SS+S+count_rank_a+trueAcc+avgplaytime+hitsperplay,data=UserData2)#full model with variables to consolidate variables excluding rank, country rank, ID
+summary(linearmod)
+lmresid=data.frame(residuals=summary(linearmod)$residuals,predicted=linearmod$fitted.values)
+ggplot(data=lmresid,aes(x=predicted,y=residuals))+geom_point()+geom_vline(xintercept = 6715, color="red")+geom_segment(aes(x = 0, y = 6715, xend = 15000, yend = 6715-15000),color="blue")
+qqnorm(residuals(linearmod)); qqline(residuals(linearmod))
+```
+linearmod=lm(pp_raw~join_date+trueAcc+log(playcount)+log(ranked_score)+log(total_score)+level+accuracy+log(total_seconds_played)+log(SS+1)+log(S+1),data=UserData2)
+```{r LogTransform}
+linearmod2=lm(pp_raw~join_date+trueAcc+log(playcount)+log(ranked_score)+log(total_score)+level+accuracy+log(total_seconds_played)+log(SS+1)+log(S+1)+log(count_rank_a+1)+avgplaytime+hitsperplay,data=UserData2)#log transforms when they appear normal distributed
+lmresid2=data.frame(residuals=summary(linearmod2)$residuals,predicted=linearmod2$fitted.values)
+ggplot(data=lmresid2,aes(x=predicted,y=residuals))+geom_point()+geom_vline(xintercept = 6715, color="red")+geom_segment(aes(x = 0, y = 6715, xend = 15000, yend = 6715-15000),color="blue")
+summary(linearmod2)
+qqnorm(residuals(linearmod2)); qqline(residuals(linearmod2))
+```
+```{r reductionlin}
+nullmod=lm(pp_raw~1,data=UserData2)
+reducedmod=step(linearmod,scope=list(lower=~1,upper=linearmod), direction="both",trace=FALSE,k=log(9999))
+summary(reducedmod)
+lmresidb=data.frame(residuals=summary(reducedmod)$residuals,predicted=reducedmod$fitted.values)
+ggplot(data=lmresidb,aes(x=predicted,y=residuals))+geom_point()+geom_vline(xintercept = 6715, color="red")+geom_segment(aes(x = 0, y = 6715, xend = 15000, yend = 6715-15000),color="blue")
+```
+```{r reductionlog}
+nullmod=lm(pp_raw~1,data=UserData2)
+reducedmod2=step(linearmod2,scope=list(lower=~1,upper=linearmod2), direction="both",trace=FALSE,k=log(9999))
+summary(reducedmod2)
+lmresid2b=data.frame(residuals=summary(reducedmod2)$residuals,predicted=reducedmod2$fitted.values)
+ggplot(data=lmresid2b,aes(x=predicted,y=residuals))+geom_point()+geom_vline(xintercept = 6715, color="red")+geom_segment(aes(x = 0, y = 6715, xend = 15000, yend = 6715-15000),color="blue")
+```
+
+
+```{r Reduced range}
+fourdigit=UserData2[1000:9999,]#Ranked 1000-9999 (approximately) pprange 9942.04 to 6715.42
+linearmod3=lm(pp_raw~join_date+trueAcc+log(playcount)+log(ranked_score)+log(total_score)+level+accuracy+log(total_seconds_played)+log(SS+1)+log(S+1)+log(count_rank_a+1)+avgplaytime+hitsperplay,data=fourdigit)
+
+lmresid3=data.frame(residuals=summary(linearmod3)$residuals,predicted=linearmod3$fitted.values)
+ggplot(data=lmresid3,aes(x=predicted,y=residuals))+geom_point()+geom_vline(xintercept = 6715, color="red")+geom_segment(aes(x = 5000, y = 6715-5000, xend = 12000, yend = 6715-12000),color="blue")
+summary(linearmod3)
+qqnorm(residuals(linearmod3)); qqline(residuals(linearmod3))
+
+```
+```{r Reduced range b}
+threedigit=UserData2[100:999,]#Ranked 100-999 (approximately) pprange 13137.5 to 9942.04
+linearmod5=lm(pp_raw~join_date+trueAcc+log(playcount)+log(ranked_score)+log(total_score)+level+accuracy+log(total_seconds_played)+log(SS+1)+log(S+1)+log(count_rank_a+1)+avgplaytime+hitsperplay,data=threedigit)
+
+lmresid5=data.frame(residuals=summary(linearmod5)$residuals,predicted=linearmod5$fitted.values)
+ggplot(data=lmresid5,aes(x=predicted,y=residuals))+geom_point()+geom_vline(xintercept = 9900, color="red")+geom_segment(aes(x = 7500, y = 9900-7500, xend = 12000, yend = 9900-12000),color="blue")
+summary(linearmod5)
+qqnorm(residuals(linearmod5)); qqline(residuals(linearmod5))
+
+```
+
+
+
+
+
+```{r ytransform}
+linearmod4=lm(sqrt(pp_raw-6715)~join_date+trueAcc+log(playcount)+log(ranked_score)+log(total_score)+level+accuracy+log(total_seconds_played)+log(SS+1)+log(S+1)+log(count_rank_a+1)+avgplaytime+hitsperplay,data=UserData2)#sqrt difference from lowest
+lmresid4=data.frame(residuals=summary(linearmod4)$residuals,predicted=linearmod4$fitted.values)
+ggplot(data=lmresid4,aes(x=predicted,y=residuals))+geom_point()
+summary(linearmod4)
+qqnorm(residuals(linearmod4)); qqline(residuals(linearmod4))
+
+```
+```{r ytransform resid}
+predictedvaluessqrt=linearmod4$fitted.values^2+6715#Reverse transform
+residualsqrt=UserData2$pp_raw-predictedvaluessqrt
+ggplot(data=lmresid4,aes(x=predictedvaluessqrt,y=residualsqrt))+geom_point()+geom_vline(xintercept = 6715, color="red")+geom_segment(aes(x = 0, y = 6715, xend = 15000, yend = 6715-15000),color="blue")
+sqrt(mean((predictedvaluessqrt-UserData2$pp_raw)^2))
+```
+
+
